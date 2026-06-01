@@ -19,26 +19,32 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Force Heavy Patch Dockerfile
+      - name: Precise Patch Dockerfile
         run: |
-          # 1. 强制在构建阶段(有网环境)把依赖同步全部做完，并生成不可变的生产环境虚拟环境
-          # 2. 强行覆写 Dockerfile 的最后一行为完全离线的启动命令，彻底废除官方可能存在的联网 Entrypoint 脚本
+          # 核心修复：
+          # 1. 官方在运行阶段通过高级手段把本地环境锁成了只读或未完全同步状态。
+          # 2. 我们通过修改环境变量，强行在有网的构建阶段让其下载所有 Python 依赖。
+          # 3. 彻底覆盖其最后的启动入口，防止它在内网再次执行在线同步脚本。
           
+          # 【步骤1】在前端/后端构建的关键位置注入环境变量，允许它把所有包下载到本地
+          if [ -f "backend/Dockerfile" ]; then
+            echo "Patching backend/Dockerfile..."
+            # 找到官方的 uv sync 或者 python 相关的运行位置，确保 --frozen 编译通过
+            sed -i 's/uv sync/uv sync --frozen/g' backend/Dockerfile
+          fi
+          
+          # 【步骤2】如果它根目录下有主 Dockerfile，我们在它最后覆写成绝对纯净的离线入口
+          # 废除原有的复杂 Entrypoint，直接用 Python 执行编译好的依赖
           cat << 'EOF' >> Dockerfile
 
-          # 以下是我们强行注入的离线固化与启动逻辑
-          RUN cd /app && uv sync --frozen
-          
-          EXPOSE 8000
-          WORKDIR /app
-          
-          # 绕过一切复杂的 entrypoint.sh 脚本，直接用 Python 虚拟环境内的 uvicorn 离线本地拉起服务
+          # 强行重置入口，直接使用构建阶段已经下载好的虚拟环境
           ENTRYPOINT []
           CMD ["/app/.venv/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
           EOF
-          
-          # 打印一下修改后的 Dockerfile 确保注入成功（可在 Action 日志中查看）
-          cat Dockerfile
+
+          # 打印 Dockerfile 方便排查
+          echo "=== Tail of Dockerfile ==="
+          tail -n 20 Dockerfile
 
       - name: Build A2A Inspector ARM64 Image
         run: |
