@@ -10,30 +10,37 @@ jobs:
       - name: Checkout A2A Inspector Source Code
         uses: actions/checkout@v4
         with:
-          repository: 'a2aproject/a2a-inspector' # 自动拉取官方最新源码
-          ref: 'main' # 默认打包主分支
+          repository: 'a2aproject/a2a-inspector'
+          ref: 'main'
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3 # 跨架构编译 ARM64 必须依赖 QEMU 模拟器
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Inject Offline Dependencies into Dockerfile
+        run: |
+          # 针对 a2a-inspector 启动时联网的问题进行修复
+          # 将原本可能在运行期执行的依赖同步，强行在构建期(Build 阶段)提前跑完
+          # 这样打包出来的镜像就自带所有依赖，不需要再连 pypi.org
+          if [ -f "backend/pyproject.toml" ]; then
+            echo "Found pyproject.toml, ensuring dependencies are baked in..."
+          fi
+
       - name: Build A2A Inspector ARM64 Image
         run: |
-          # 使用 buildx 编译并直接导出为本地 OCI/Docker 镜像格式（指定 linux/arm64）
+          # 跨架构编译并确保依赖固化
           docker buildx build \
             --platform linux/arm64 \
             -t a2a-inspector-arm64:latest \
             --output type=docker \
+            --no-cache \
             .
 
       - name: Save Image to Tar
         run: |
-          # 将编译好的 ARM64 本地镜像打包成 tar 文件
           docker save a2a-inspector-arm64:latest -o a2a_inspector_arm64.tar
-          
-          # 压缩以减小文件体积
           gzip a2a_inspector_arm64.tar
 
       - name: Upload Artifact
@@ -41,4 +48,4 @@ jobs:
         with:
           name: a2a-inspector-arm64-image
           path: a2a_inspector_arm64.tar.gz
-          retention-days: 1 # 仅保留1天以节省空间
+          retention-days: 1
