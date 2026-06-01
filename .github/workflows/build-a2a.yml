@@ -1,13 +1,13 @@
 name: Build and Pack A2A Inspector ARM64 Image
 
 on:
-  workflow_dispatch: # 允许手动点击按钮触发执行
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout A2A Inspector Source Code
+      - name: Checkout Source
         uses: actions/checkout@v4
         with:
           repository: 'a2aproject/a2a-inspector'
@@ -19,26 +19,29 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Patch Dockerfile and Scripts for Offline Use
+      - name: Force Heavy Patch Dockerfile
         run: |
-          # 核心修复逻辑：
-          # 1. 查找官方启动脚本（通常是 entrypoint.sh 或 scripts 目录下的启动文件）
-          # 2. 强行在 uv sync 命令后面加上 --offline 或者是把运行时同步直接删掉，改在构建期完成
+          # 1. 强制在构建阶段(有网环境)把依赖同步全部做完，并生成不可变的生产环境虚拟环境
+          # 2. 强行覆写 Dockerfile 的最后一行为完全离线的启动命令，彻底废除官方可能存在的联网 Entrypoint 脚本
           
-          # 修改 backend/Dockerfile，让它在 build 阶段就把依赖锁死
-          # 并在运行期禁用网络同步
-          if [ -f "backend/Dockerfile" ]; then
-            echo "Patching backend Dockerfile..."
-            # 在构建期强行执行一次同步，把所有包下载到镜像里
-            sed -i '/COPY . \./i RUN uv sync --frozen' backend/Dockerfile
-          fi
+          cat << 'EOF' >> Dockerfile
+
+          # 以下是我们强行注入的离线固化与启动逻辑
+          RUN cd /app && uv sync --frozen
           
-          # 检查并修改可能的启动脚本
-          find . -name "*.sh" -o -name "run*" | xargs sed -i 's/uv sync/uv sync --offline/g' 2>/dev/null || true
+          EXPOSE 8000
+          WORKDIR /app
+          
+          # 绕过一切复杂的 entrypoint.sh 脚本，直接用 Python 虚拟环境内的 uvicorn 离线本地拉起服务
+          ENTRYPOINT []
+          CMD ["/app/.venv/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+          EOF
+          
+          # 打印一下修改后的 Dockerfile 确保注入成功（可在 Action 日志中查看）
+          cat Dockerfile
 
       - name: Build A2A Inspector ARM64 Image
         run: |
-          # 开始跨架构编译
           docker buildx build \
             --platform linux/arm64 \
             -t a2a-inspector-arm64:latest \
