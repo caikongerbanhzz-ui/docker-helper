@@ -19,23 +19,30 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Inject Offline Dependencies into Dockerfile
+      - name: Patch Dockerfile and Scripts for Offline Use
         run: |
-          # 针对 a2a-inspector 启动时联网的问题进行修复
-          # 将原本可能在运行期执行的依赖同步，强行在构建期(Build 阶段)提前跑完
-          # 这样打包出来的镜像就自带所有依赖，不需要再连 pypi.org
-          if [ -f "backend/pyproject.toml" ]; then
-            echo "Found pyproject.toml, ensuring dependencies are baked in..."
+          # 核心修复逻辑：
+          # 1. 查找官方启动脚本（通常是 entrypoint.sh 或 scripts 目录下的启动文件）
+          # 2. 强行在 uv sync 命令后面加上 --offline 或者是把运行时同步直接删掉，改在构建期完成
+          
+          # 修改 backend/Dockerfile，让它在 build 阶段就把依赖锁死
+          # 并在运行期禁用网络同步
+          if [ -f "backend/Dockerfile" ]; then
+            echo "Patching backend Dockerfile..."
+            # 在构建期强行执行一次同步，把所有包下载到镜像里
+            sed -i '/COPY . \./i RUN uv sync --frozen' backend/Dockerfile
           fi
+          
+          # 检查并修改可能的启动脚本
+          find . -name "*.sh" -o -name "run*" | xargs sed -i 's/uv sync/uv sync --offline/g' 2>/dev/null || true
 
       - name: Build A2A Inspector ARM64 Image
         run: |
-          # 跨架构编译并确保依赖固化
+          # 开始跨架构编译
           docker buildx build \
             --platform linux/arm64 \
             -t a2a-inspector-arm64:latest \
             --output type=docker \
-            --no-cache \
             .
 
       - name: Save Image to Tar
