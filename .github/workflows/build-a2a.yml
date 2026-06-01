@@ -19,39 +19,33 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Hard Patch Backend Dockerfile
+      - name: Universal Patch All Dockerfiles
         run: |
-          # 1. 彻底移除官方可能带去联网的 entrypoint 脚本和旧 CMD
-          # 2. 精准定位到 backend 目录下，通过正确的模块路径拉起 uvicorn
+          # 自动寻找仓库里的所有 Dockerfile（不论是在根目录还是 backend 目录）
+          # 并使用 Python 的特殊模块路径启动，确保能安全加载
           
-          TARGET_DF="backend/Dockerfile"
-          
-          if [ -f "$TARGET_DF" ]; then
-            echo "Found backend Dockerfile, stripping entrypoint and fixing path..."
+          find . -name "Dockerfile*" | while read -r df; do
+            echo "🎯 Found Dockerfile to patch: $df"
             
-            # 删除原有的 ENTRYPOINT 和 CMD 行（防止多指令冲突或调用联网脚本）
-            sed -i '/ENTRYPOINT/d' $TARGET_DF
-            sed -i '/CMD/d' $TARGET_DF
+            # 1. 彻底清除里面所有的 ENTRYPOINT 和 CMD 指令，防止多阶段构建中任何一处残留联网脚本
+            sed -i '/ENTRYPOINT/d' "$df"
+            sed -i '/CMD/d' "$df"
             
-            # 在 backend/Dockerfile 末尾追加绝对安全的离线启动命令
-            # 官方的工作目录是 /app，后端代码在 /app/backend
-            cat << 'EOF' >> $TARGET_DF
+            # 2. 在文件末尾追加绝对安全的离线启动逻辑
+            # 同时兼容直接运行 main:app 和 通过 python -m uvicorn 运行
+            cat << 'EOF' >> "$df"
 
-            # 强行重置入口：无网络请求，直接通过 python 模块路径启动
+            # 强行重置入口：无网络请求，尝试多路径兼容拉起服务
             ENTRYPOINT []
-            CMD ["/app/.venv/bin/uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+            CMD ["/bin/sh", "-c", "if [ -d 'backend' ]; then /app/.venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port 8000; else /app/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000; fi"]
           EOF
             
-            echo "=== Modified backend/Dockerfile ==="
-            cat $TARGET_DF
-          else
-            echo "ERROR: backend/Dockerfile not found!"
-            exit 1
-          fi
+            echo "=== Content of patched $df ==="
+            cat "$df"
+          done
 
       - name: Build A2A Inspector ARM64 Image
         run: |
-          # 正常编译整个项目（Docker 会自动读取修改后的 backend/Dockerfile）
           docker buildx build \
             --platform linux/arm64 \
             -t a2a-inspector-arm64:latest \
