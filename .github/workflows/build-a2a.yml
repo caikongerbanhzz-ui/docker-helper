@@ -19,35 +19,39 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Precise Patch Dockerfile
+      - name: Hard Patch Backend Dockerfile
         run: |
-          # 核心修复：
-          # 1. 官方在运行阶段通过高级手段把本地环境锁成了只读或未完全同步状态。
-          # 2. 我们通过修改环境变量，强行在有网的构建阶段让其下载所有 Python 依赖。
-          # 3. 彻底覆盖其最后的启动入口，防止它在内网再次执行在线同步脚本。
+          # 1. 彻底移除官方可能带去联网的 entrypoint 脚本和旧 CMD
+          # 2. 精准定位到 backend 目录下，通过正确的模块路径拉起 uvicorn
           
-          # 【步骤1】在前端/后端构建的关键位置注入环境变量，允许它把所有包下载到本地
-          if [ -f "backend/Dockerfile" ]; then
-            echo "Patching backend/Dockerfile..."
-            # 找到官方的 uv sync 或者 python 相关的运行位置，确保 --frozen 编译通过
-            sed -i 's/uv sync/uv sync --frozen/g' backend/Dockerfile
-          fi
+          TARGET_DF="backend/Dockerfile"
           
-          # 【步骤2】如果它根目录下有主 Dockerfile，我们在它最后覆写成绝对纯净的离线入口
-          # 废除原有的复杂 Entrypoint，直接用 Python 执行编译好的依赖
-          cat << 'EOF' >> Dockerfile
+          if [ -f "$TARGET_DF" ]; then
+            echo "Found backend Dockerfile, stripping entrypoint and fixing path..."
+            
+            # 删除原有的 ENTRYPOINT 和 CMD 行（防止多指令冲突或调用联网脚本）
+            sed -i '/ENTRYPOINT/d' $TARGET_DF
+            sed -i '/CMD/d' $TARGET_DF
+            
+            # 在 backend/Dockerfile 末尾追加绝对安全的离线启动命令
+            # 官方的工作目录是 /app，后端代码在 /app/backend
+            cat << 'EOF' >> $TARGET_DF
 
-          # 强行重置入口，直接使用构建阶段已经下载好的虚拟环境
-          ENTRYPOINT []
-          CMD ["/app/.venv/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+            # 强行重置入口：无网络请求，直接通过 python 模块路径启动
+            ENTRYPOINT []
+            CMD ["/app/.venv/bin/uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
           EOF
-
-          # 打印 Dockerfile 方便排查
-          echo "=== Tail of Dockerfile ==="
-          tail -n 20 Dockerfile
+            
+            echo "=== Modified backend/Dockerfile ==="
+            cat $TARGET_DF
+          else
+            echo "ERROR: backend/Dockerfile not found!"
+            exit 1
+          fi
 
       - name: Build A2A Inspector ARM64 Image
         run: |
+          # 正常编译整个项目（Docker 会自动读取修改后的 backend/Dockerfile）
           docker buildx build \
             --platform linux/arm64 \
             -t a2a-inspector-arm64:latest \
