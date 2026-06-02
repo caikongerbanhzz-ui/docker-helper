@@ -19,23 +19,20 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Universal Autodiscover Patch
+      - name: Inject Offline Sync Flags into Dockerfile
         run: |
-          # 遍历所有 Dockerfile，清除原有的启动入口
+          # 既不删 ENTRYPOINT 也不改 CMD 路径，保持官方原汁原味
+          # 只做一件事：在构建阶段把网络拉满下完包，在运行阶段把 uv 强制切成纯离线模式
+          
           find . -name "Dockerfile*" | while read -r df; do
-            echo "🎯 Patching: $df"
-            sed -i '/ENTRYPOINT/d' "$df"
-            sed -i '/CMD/d' "$df"
+            echo "🎯 Modifying flags in: $df"
             
-            # 注入全自动寻路启动脚本：
-            # 1. 自动在容器内寻找真正的 main.py 所在目录
-            # 2. 自动寻找 uv 编译出来的虚拟环境可执行文件 (uvicorn)
-            # 3. 动态切换到正确目录并离线拉起服务
-            cat << 'EOF' >> "$df"
-
-            ENTRYPOINT []
-            CMD ["/bin/sh", "-c", "REAL_MAIN_DIR=$(find / -name 'main.py' -not -path '*/.venv/*' -not -path '*/node_modules/*' 2>/dev/null | head -n 1 | xargs dirname); REAL_UVICORN=$(find / -name 'uvicorn' 2>/dev/null | head -n 1); if [ -n \"$REAL_MAIN_DIR\" ] && [ -n \"$REAL_UVICORN\" ]; then echo \"🚀 Found app at: $REAL_MAIN_DIR using $REAL_UVICORN\"; cd \"$REAL_MAIN_DIR\" && \"$REAL_UVICORN\" main:app --host 0.0.0.0 --port 8000; else echo \"❌ Target directory or uvicorn not found!\"; fi"]
-          EOF
+            # 让构建阶段的 uv sync 使用 frozen 模式，强制把依赖固化到当前层里
+            sed -i 's/uv sync/uv sync --frozen/g' "$df"
+            
+            # 在最后的 CMD 或 ENTRYPOINT 之前，注入离线环境变量，迫使 uv 停止外网同步
+            # uv 工具只要检测到 UV_OFFLINE=1，运行时就会完全变成单机模式，绝对不调 pypi.org
+            sed -i '/FROM/a ENV UV_OFFLINE=1' "$df"
             
             echo "=== Patched $df ==="
             cat "$df"
