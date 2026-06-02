@@ -21,26 +21,34 @@ jobs:
 
       - name: Hardcore Overwrite Dockerfile
         run: |
-          # 鉴于官方多阶段构建中运行层丢失了大量组件，且核心文件为 app.py
-          # 我们不再对原文件修修补补，直接用我们完全可控的、最稳固的基础镜像重写最后几行
+          # 1. 既然知道它缺包，我们在有网的编译阶段直接使出降维打击
+          # 2. 我们安装 micropipenv 动态解析它 pyproject.toml 里的所有绝对依赖，并融合成一个 requirements.txt
+          pip install micropipenv
+          micropipenv requirements > all_requirements.txt || echo "fastapi\nuvicorn\npydantic\npython-socketio\npyjwt\nsse-starlette\nasgi-lifespan\nvalidators\njinja2\npytest\nbleach\nrequests\ntyping-extensions" > all_requirements.txt
           
-          # 1. 找到官方 Dockerfile 最后一个阶段开始的地方 (通常是 FROM python:3.12-slim 或者是类似的运行层)
-          # 我们直接在 Dockerfile 的最后追加一段“暴力补课”逻辑：强行在运行层把运行所需的核心组件用全局 pip 装好
-          cat << 'EOF' >> ./Dockerfile
+          # 确保 bleach 无论如何都在兜底列表里
+          if ! grep -q "bleach" all_requirements.txt; then
+            echo "bleach" >> all_requirements.txt
+          fi
+          
+          # 把这个全量依赖表转成单行安装命令，塞进 Dockerfile 末尾
+          DEPENDENCIES=$(cat all_requirements.txt | tr '\n' ' ')
+          
+          cat << EOF >> ./Dockerfile
 
           # === 强行注入全量离线运行环境 ===
-          # 在最后一层强行补齐缺失的 Web 服务器和核心依赖，并把源切回全局
-          RUN pip install --no-cache-dir fastapi uvicorn pydantic python-socketio pyjwt sse-starlette asgi-lifespan validators jinja2 pytest
+          # 将全量依赖库（包含 bleach 及所有潜在依赖）死死固化到全局
+          RUN pip install --no-cache-dir $DEPENDENCIES
 
           # 设置确切的工作目录到代码所在的 backend
           WORKDIR /app/backend
 
-          # 抢回指挥权，直接用刚刚装好的全局 uvicorn 离线调起 app.py
+          # 绝对无网络请求拉起服务
           ENTRYPOINT []
           CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
           EOF
 
-          echo "=== 检查最终生成的硬核 Dockerfile ==="
+          echo "=== 检查包含全量依赖的 Dockerfile ==="
           cat ./Dockerfile
 
       - name: Build A2A Inspector ARM64 Image
