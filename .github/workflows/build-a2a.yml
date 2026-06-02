@@ -21,24 +21,14 @@ jobs:
 
       - name: Hardcore Overwrite Dockerfile
         run: |
-          # 1. 既然知道它缺包，我们在有网的编译阶段直接使出降维打击
-          # 2. 我们安装 micropipenv 动态解析它 pyproject.toml 里的所有绝对依赖，并融合成一个 requirements.txt
-          pip install micropipenv
-          micropipenv requirements > all_requirements.txt || echo "fastapi\nuvicorn\npydantic\npython-socketio\npyjwt\nsse-starlette\nasgi-lifespan\nvalidators\njinja2\npytest\nbleach\nrequests\ntyping-extensions" > all_requirements.txt
+          # 没有任何动态读取，没有任何 \n 转义。
+          # 直接把已知的、包含 bleach 在内的全量依赖库用干净的空格写死。
           
-          # 确保 bleach 无论如何都在兜底列表里
-          if ! grep -q "bleach" all_requirements.txt; then
-            echo "bleach" >> all_requirements.txt
-          fi
-          
-          # 把这个全量依赖表转成单行安装命令，塞进 Dockerfile 末尾
-          DEPENDENCIES=$(cat all_requirements.txt | tr '\n' ' ')
-          
-          cat << EOF >> ./Dockerfile
+          cat << 'EOF' >> ./Dockerfile
 
           # === 强行注入全量离线运行环境 ===
-          # 将全量依赖库（包含 bleach 及所有潜在依赖）死死固化到全局
-          RUN pip install --no-cache-dir $DEPENDENCIES
+          # 手工锁死依赖列表，坚决不再允许任何转义符污染 Dockerfile
+          RUN pip install --no-cache-dir fastapi uvicorn pydantic python-socketio pyjwt sse-starlette asgi-lifespan validators jinja2 pytest bleach requests typing-extensions
 
           # 设置确切的工作目录到代码所在的 backend
           WORKDIR /app/backend
