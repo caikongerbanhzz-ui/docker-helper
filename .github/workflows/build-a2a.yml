@@ -1,3 +1,6 @@
+# 私仓仅放本文件时使用：从官方仓库拉取完整源码再构建镜像。
+# 放置路径：.github/workflows/build-a2a.yml（GitHub 只识别该目录）
+
 name: Build and Pack A2A Inspector ARM64 Image
 
 on:
@@ -7,11 +10,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Source
+      - name: Checkout official a2a-inspector source
         uses: actions/checkout@v4
         with:
-          repository: 'a2aproject/a2a-inspector'
-          ref: 'main'
+          repository: a2aproject/a2a-inspector
+          ref: main
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -19,44 +22,23 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Hardcore Overwrite Dockerfile
-        run: |
-          # 没有任何动态读取，没有任何 \n 转义。
-          # 直接把已知的、包含 bleach 在内的全量依赖库用干净的空格写死。
-          
-          cat << 'EOF' >> ./Dockerfile
-
-          # === 强行注入全量离线运行环境 ===
-          # 手工锁死依赖列表，坚决不再允许任何转义符污染 Dockerfile
-          RUN pip install --no-cache-dir fastapi uvicorn pydantic python-socketio pyjwt sse-starlette asgi-lifespan validators jinja2 pytest bleach requests typing-extensions
-
-          # 设置确切的工作目录到代码所在的 backend
-          WORKDIR /app/backend
-
-          # 绝对无网络请求拉起服务
-          ENTRYPOINT []
-          CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
-          EOF
-
-          echo "=== 检查包含全量依赖的 Dockerfile ==="
-          cat ./Dockerfile
-
-      - name: Build A2A Inspector ARM64 Image
-        run: |
-          docker buildx build \
-            --platform linux/arm64 \
-            -t a2a-inspector-arm64:latest \
-            --output type=docker \
-            .
+      - name: Build image (official Dockerfile + uv sync)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          tags: a2a-inspector-arm64:latest
+          load: true
 
       - name: Save Image to Tar
         run: |
           docker save a2a-inspector-arm64:latest -o a2a_inspector_arm64.tar
-          gzip a2a_inspector_arm64.tar
+          gzip -f a2a_inspector_arm64.tar
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: a2a-inspector-arm64-image
           path: a2a_inspector_arm64.tar.gz
-          retention-days: 1
+          retention-days: 7
