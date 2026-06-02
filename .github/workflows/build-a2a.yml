@@ -1,10 +1,19 @@
-# 私仓仅放本文件时使用：从官方仓库拉取完整源码再构建镜像。
-# 放置路径：.github/workflows/build-a2a.yml（GitHub 只识别该目录）
+# 私仓仅放本文件时使用：从官方仓库拉取完整源码，在 GitHub（有外网）构建镜像，再拷到无外网 Linux 运行。
+# 放置路径：.github/workflows/build-a2a.yml
 
-name: Build and Pack A2A Inspector ARM64 Image
+name: Build and Pack A2A Inspector Image (Offline Runtime)
 
 on:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: "目标服务器架构（uname -m：aarch64→arm64，x86_64→amd64）"
+        required: true
+        default: linux/arm64
+        type: choice
+        options:
+          - linux/arm64
+          - linux/amd64
 
 jobs:
   build:
@@ -22,23 +31,55 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build image (official Dockerfile + uv sync)
+      # 离线服务器上不能再访问 PyPI：构建时装齐运行时依赖，启动时禁止 uv 联网
+      - name: Patch Dockerfile for offline runtime
+        run: |
+          set -eux
+          # 只装运行时依赖，不装 dev（respx、asgi-lifespan 等）
+          sed -i 's/^RUN uv sync --no-cache$/RUN uv sync --no-cache --no-dev --frozen/' Dockerfile
+          # validators 在构建阶段写入 .venv（官方单独一行 pip install）
+          sed -i 's|^RUN uv pip install validators$|RUN uv pip install --python /app/.venv validators|' Dockerfile
+          # 不用 uv run，避免容器启动时再次 sync
+          sed -i 's|CMD \["uv", "run", "--", "uvicorn",|CMD ["/app/.venv/bin/uvicorn",|' Dockerfile
+          sed -i '/^WORKDIR \/app\/backend$/a ENV UV_NO_SYNC=1\nENV UV_OFFLINE=1' Dockerfile
+          echo "=== Patched Dockerfile (stage 2 tail) ==="
+          tail -n 20 Dockerfile
+
+      - name: Build image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/arm64
-          tags: a2a-inspector-arm64:latest
+          platforms: ${{ inputs.platform }}
+          tags: a2a-inspector-offline:latest
           load: true
+
+      # 构建机上用 --network none 验证：启动过程不访问外网
+      - name: Verify offline start (no network)
+        run: |
+          set -eux
+          docker run --rm --network none \
+            -w /app/backend \
+            a2a-inspector-offline:latest \
+            /app/.venv/bin/python -c "
+          import httpx, bleach, validators
+          from a2a.client import A2ACardResolver
+          print('offline deps ok')
+          "
+          docker run -d --name a2a-smoke --network none \
+            a2a-inspector-offline:latest
+          sleep 5
+          docker logs a2a-smoke
+          docker rm -f a2a-smoke
 
       - name: Save Image to Tar
         run: |
-          docker save a2a-inspector-arm64:latest -o a2a_inspector_arm64.tar
-          gzip -f a2a_inspector_arm64.tar
+          docker save a2a-inspector-offline:latest -o a2a_inspector_offline.tar
+          gzip -f a2a_inspector_offline.tar
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: a2a-inspector-arm64-image
-          path: a2a_inspector_arm64.tar.gz
+          name: a2a-inspector-offline-image
+          path: a2a_inspector_offline.tar.gz
           retention-days: 7
