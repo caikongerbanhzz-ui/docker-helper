@@ -19,29 +19,34 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Pre-download Dependencies via Host Python
+      - name: Create Absolute Debug Entrypoint
         run: |
-          pip install micropipenv
-          micropipenv requirements > requirements.txt || echo "fastapi\nuvicorn\npydantic\npython-socketio\npyjwt\na2a-sdk\nsse-starlette\nasgi-lifespan\nvalidators\njinja2\npytest\ntypes-requests\ntyping-extensions" > requirements.txt
-          mkdir wheels
-          pip download --platform linux_arm64 --only-binary=:all: -d wheels -r requirements.txt || true
-
-      - name: Create Clean Entrypoint Script
-        run: |
-          # 建立一个绝对不会有引号、转义字符问题的纯文本启动脚本
+          # 建立一个绝对不会死循环、且能暴露内部所有死因的调试脚本
           cat << 'EOF' > start.sh
           #!/bin/sh
+          echo "=== 🕵️‍♂️ 启动全量环境诊断 ==="
+          echo "当前工作目录:" && pwd
+          echo "当前目录下的文件:" && ls -la
+          if [ -d "backend" ]; then echo "发现 backend 目录，其中的文件:" && ls -la backend; fi
+          echo "当前系统安装的 Python 包列表:" && pip list || true
+          
+          echo "=== 🚀 开始尝试拉起服务 ==="
           if [ -d "backend" ]; then
-              exec uvicorn backend.main:app --host 0.0.0.0 --port 8000
+              uvicorn backend.main:app --host 0.0.0.0 --port 8000
           else
-              exec uvicorn main:app --host 0.0.0.0 --port 8000
+              uvicorn main:app --host 0.0.0.0 --port 8000
           fi
+          
+          # 【核心改动】如果上面的 uvicorn 崩溃了，绝对不允许容器退出！
+          # 强行打印错误码，并进入无限休眠，确保你执行 docker logs 时能看清所有死因
+          echo "❌ 服务崩溃了！错误码为: $?"
+          echo "进入挂起状态，等待你查看日志。容器不会重启..."
+          while true; do sleep 3600; done
           EOF
           chmod +x start.sh
 
-      - name: Inject Pure Offline Installation into Dockerfile
+      - name: Inject Debug Logic into Dockerfile
         run: |
-          # 用 Python 只清除坏行，不写入复杂的 CMD 字符串
           python3 -c "
           import os
 
@@ -54,29 +59,24 @@ jobs:
 
           new_lines = []
           for line in lines:
-              if any(k in line for k in ['uv sync', 'uv pip', 'pip install', 'ENTRYPOINT', 'CMD', 'COPY pyproject.toml']):
+              # 擦除所有的启动命令，防止干扰
+              if any(k in line for k in ['ENTRYPOINT', 'CMD']):
                   continue
               new_lines.append(line)
 
-          # 仅插入离线安装包和复制启动脚本的命令
-          offline_inject = (
+          # 只负责把 start.sh 塞进去并作为唯一入口
+          debug_inject = (
               '\n'
-              'COPY wheels /app/wheels\n'
-              'RUN pip install --no-index --find-links=/app/wheels /app/wheels/*.whl || true\n'
               'COPY start.sh /app/start.sh\n'
               'EXPOSE 8000\n'
               'ENTRYPOINT [\"/app/start.sh\"]\n'
           )
 
-          for i, line in enumerate(new_lines):
-              if 'WORKDIR' in line:
-                  new_lines.insert(i + 1, offline_inject)
-                  break
-
           with open(df_path, 'w') as f:
               f.writelines(new_lines)
+              f.write(debug_inject)
           "
-          echo "=== Patched Dockerfile ==="
+          echo "=== Debug Dockerfile ==="
           cat ./Dockerfile
 
       - name: Build A2A Inspector ARM64 Image
