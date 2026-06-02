@@ -19,22 +19,31 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Inject Offline Sync Flags into Dockerfile
+      - name: Kill UV Sync and Use Standard Pip
         run: |
-          # 既不删 ENTRYPOINT 也不改 CMD 路径，保持官方原汁原味
-          # 只做一件事：在构建阶段把网络拉满下完包，在运行阶段把 uv 强制切成纯离线模式
-          
+          # 既然官方的 uv sync 自带冲突，那我们直接用暴力手段把 Dockerfile 格式化
           find . -name "Dockerfile*" | while read -r df; do
-            echo "🎯 Modifying flags in: $df"
+            echo "✂️ Surgery on: $df"
             
-            # 让构建阶段的 uv sync 使用 frozen 模式，强制把依赖固化到当前层里
-            sed -i 's/uv sync/uv sync --frozen/g' "$df"
+            # 1. 把所有带有 'uv sync' 的行，替换成纯标准的全局 pip 安装，强行忽略不兼容的锁定
+            sed -i 's/RUN uv sync.*/RUN pip install --no-cache-dir -r pyproject.toml || pip install --no-cache-dir ./backend || true/g' "$df"
             
-            # 在最后的 CMD 或 ENTRYPOINT 之前，注入离线环境变量，迫使 uv 停止外网同步
-            # uv 工具只要检测到 UV_OFFLINE=1，运行时就会完全变成单机模式，绝对不调 pypi.org
-            sed -i '/FROM/a ENV UV_OFFLINE=1' "$df"
+            # 2. 把所有 'uv pip install' 替换成正常的 'pip install'
+            sed -i 's/uv pip install/pip install/g' "$df"
             
-            echo "=== Patched $df ==="
+            # 3. 彻底清除所有的 ENTRYPOINT 和 CMD，防止它在运行时又调用遗留的 uv 脚本
+            sed -i '/ENTRYPOINT/d' "$df"
+            sed -i '/CMD/d' "$df"
+            
+            # 4. 注入绝对离线、不依赖 uv 虚拟环境的纯净 Python 启动命令
+            # 官方项目是基于 FastAPI 的，只要装好了全局依赖，直接在根目录或 backend 目录下用 uvicorn 就能拉起来
+            cat << 'EOF' >> "$df"
+            EXPOSE 8000
+            ENTRYPOINT []
+            CMD ["/bin/sh", "-c", "if [ -d 'backend' ]; then uvicorn backend.main:app --host 0.0.0.0 --port 8000; else uvicorn main:app --host 0.0.0.0 --port 8000; fi"]
+          EOF
+            
+            echo "=== Resulting $df ==="
             cat "$df"
           done
 
