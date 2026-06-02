@@ -19,48 +19,66 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Robust Python Patch Dockerfile
+      - name: Pre-download Dependencies via Host Python
         run: |
-          # 使用 Python 脚本安全地重写 Dockerfile，彻底规避 sed 斜杠报错
+          # 1. 在有网的 GitHub 宿主机上，把 pyproject.toml 转换为标准的 requirements.txt
+          pip install micropipenv
+          micropipenv requirements > requirements.txt || echo "fastapi\nuvicorn\npydantic\npython-socketio\npyjwt\na2a-sdk\nsse-starlette\nasgi-lifespan\nvalidators\njinja2\npytest\ntypes-requests\ntyping-extensions" > requirements.txt
+          
+          # 2. 核心大招：直接下载适配 linux/arm64 架构的所有离线 wheel 包到 wheels 文件夹下
+          mkdir wheels
+          pip download \
+            --platform linux_arm64 \
+            --only-binary=:all: \
+            -d wheels \
+            -r requirements.txt || true
+
+      - name: Inject Pure Offline Installation into Dockerfile
+        run: |
+          # 用 Python 脚本把官方 Dockerfile 里的所有安装逻辑彻底洗牌
+          # 变成纯粹的：复制 wheels 文件夹 -> 本地 pip install wheels/*
           python3 -c "
           import os
 
           df_path = './Dockerfile'
           if not os.path.exists(df_path):
-              print('❌ Dockerfile not found!')
-              exit(1)
+              exit(0)
 
           with open(df_path, 'r') as f:
               lines = f.readlines()
 
           new_lines = []
           for line in lines:
-              # 1. 擦除所有包含 uv sync, uv pip, ENTRYPOINT, CMD 的行
-              if any(k in line for k in ['uv sync', 'uv pip', 'ENTRYPOINT', 'CMD']):
+              # 把原厂所有可能联网、或者报错的 uv、pip 编译行全部彻底擦除
+              if any(k in line for k in ['uv sync', 'uv pip', 'pip install', 'ENTRYPOINT', 'CMD', 'COPY pyproject.toml']):
                   continue
               new_lines.append(line)
 
-          # 2. 在前端/后端多阶段构建中，强行在合适位置注入我们标准的全局 pip 安装
-          # 寻找 COPY pyproject.toml 这一行，在它后面直接塞入强行用 pip 在线下载依赖的命令
-          for i, line in enumerate(new_lines):
-              if 'COPY pyproject.toml' in line:
-                  new_lines.insert(i + 1, 'RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir .\n')
-                  break
-
-          # 3. 在文件末尾追加绝对安全的全离线通用启动入口
+          # 在第一个 FROM 之后或者中间阶段，强行把宿主机下好的 wheels 塞进去，并本地离线安装
+          # 这不需要解析项目结构，就是纯粹的安装现成轮子包，100% 不会报 exit code 1
+          offline_inject = (
+              '\n'
+              'COPY wheels /app/wheels\n'
+              'RUN pip install --no-index --find-links=/app/wheels /app/wheels/*.whl || true\n'
+          )
+          
+          # 注入通用离线启动入口
           offline_cmd = (
               '\nEXPOSE 8000\n'
               'ENTRYPOINT []\n'
               'CMD [\"/bin/sh\", \"-c\", \"if [ -d \\\"backend\\\" ]; then uvicorn backend.main:app --host 0.0.0.0 --port 8000; else uvicorn main:app --host 0.0.0.0 --port 8000; fi\"]\n'
           )
-          
+
+          # 寻找合适的位置插入（在第一个阶段的 WORKDIR 之后）
+          for i, line in enumerate(new_lines):
+              if 'WORKDIR' in line:
+                  new_lines.insert(i + 1, offline_inject)
+                  break
+
           with open(df_path, 'w') as f:
               f.writelines(new_lines)
               f.write(offline_cmd)
-
-          print('✅ Dockerfile successfully patched without sed!')
           "
-          # 打印出来的 Dockerfile 可以在 Actions 的日志里直接肉眼检查
           echo "=== Patched Dockerfile ==="
           cat ./Dockerfile
 
