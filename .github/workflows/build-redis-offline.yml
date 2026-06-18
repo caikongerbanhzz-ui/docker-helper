@@ -1,0 +1,70 @@
+# 离线环境使用：在 GitHub（有外网）拉取指定架构的官方 Redis 镜像并打包，再拷到无外网 Linux 运行。
+# 放置路径：.github/workflows/build-redis-offline.yml
+
+name: Pull and Pack Redis Image (Offline Runtime)
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: "目标服务器架构（uname -m：x86_64→amd64，aarch64→arm64）"
+        required: true
+        default: linux/amd64 # 默认设置为 x86 架构
+        type: choice
+        options:
+          - linux/amd64
+          - linux/arm64
+      redis_version:
+        description: "需要拉取的 Redis 版本标签"
+        required: true
+        default: "7.2" # 你可以修改为需要的版本，如 alpine, latest 等
+
+jobs:
+  build-and-pack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Pull Specific Architecture Redis Image
+        run: |
+          set -eux
+          # 使用 --platform 强制拉取目标架构的镜像
+          docker pull --platform ${{ inputs.platform }} redis:${{ inputs.redis_version }}
+
+      - name: Verify Image Architecture
+        run: |
+          set -eux
+          echo "=== 验证拉取到的 Redis 镜像架构 ==="
+          # 获取实际拉取到的架构信息并打印
+          ACTUAL_ARCH=$(docker inspect --format='{{.Os}}/{{.Architecture}}' redis:${{ inputs.redis_version }})
+          echo "拉取到的镜像架构为: $ACTUAL_ARCH"
+          
+          # 做一个断言，确保和输入的 platform 一致（去掉 linux/ 前缀）
+          EXPECTED_ARCH=$(echo "${{ inputs.platform }}" | cut -d'/' -f2)
+          docker inspect --format='{{.Architecture}}' redis:${{ inputs.redis_version }} | grep -q "$EXPECTED_ARCH"
+
+      - name: Save Image to Tar
+        run: |
+          set -eux
+          # 将架构名称中的斜杠替换为下划线，方便作为文件名 (例如 linux_amd64)
+          PLATFORM_STR=$(echo "${{ inputs.platform }}" | tr '/' '_')
+          FILENAME="redis_${{ inputs.redis_version }}_${PLATFORM_STR}.tar"
+          
+          # 打包镜像
+          docker save redis:${{ inputs.redis_version }} -o $FILENAME
+          gzip -f $FILENAME
+          
+          # 将文件名传递给下一个 Step 使用
+          echo "PACKED_FILE=${FILENAME}.gz" >> $GITHUB_ENV
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: redis-offline-image-${{ inputs.redis_version }}
+          path: |
+            *.tar.gz
+          retention-days: 7
