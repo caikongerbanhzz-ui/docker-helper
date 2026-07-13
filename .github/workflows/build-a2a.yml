@@ -1,7 +1,7 @@
 # 私仓仅放本文件时使用：从官方仓库拉取完整源码，在 GitHub（有外网）构建镜像，再拷到无外网 Linux 运行。
 # 放置路径：.github/workflows/build-a2a.yml
 
-name: Build and Pack A2A Inspector Image (Offline Runtime)
+name: Build and Pack A2A Inspector Image (Offline Runtime)-060713
 
 on:
   workflow_dispatch:
