@@ -1,0 +1,70 @@
+# 离线环境使用：在 GitHub（有外网）拉取指定架构的官方 RocketMQ 镜像并打包，再拷到无外网 Linux 运行。
+# 放置路径：.github/workflows/build-rocketmq-offline.yml
+
+name: Pull and Pack RocketMQ Image (Offline Runtime)
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: "目标服务器架构（uname -m：x86_64→amd64，aarch64→arm64）"
+        required: true
+        default: linux/amd64 # 默认设置为 x86 架构
+        type: choice
+        options:
+          - linux/amd64
+          - linux/arm64
+      rocketmq_version:
+        description: "需要拉取的 RocketMQ 版本标签"
+        required: true
+        default: "5.3.1" # 默认拉取 5.3.1 版本
+
+jobs:
+  build-and-pack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Pull Specific Architecture RocketMQ Image
+        run: |
+          set -eux
+          # 使用 --platform 强制拉取目标架构的镜像
+          docker pull --platform ${{ inputs.platform }} apache/rocketmq:${{ inputs.rocketmq_version }}
+
+      - name: Verify Image Architecture
+        run: |
+          set -eux
+          echo "=== 验证拉取到的 RocketMQ 镜像架构 ==="
+          # 获取实际拉取到的架构信息并打印
+          ACTUAL_ARCH=$(docker inspect --format='{{.Os}}/{{.Architecture}}' apache/rocketmq:${{ inputs.rocketmq_version }})
+          echo "拉取到的镜像架构为: $ACTUAL_ARCH"
+          
+          # 做一个断言，确保和输入的 platform 一致（去掉 linux/ 前缀）
+          EXPECTED_ARCH=$(echo "${{ inputs.platform }}" | cut -d'/' -f2)
+          docker inspect --format='{{.Architecture}}' apache/rocketmq:${{ inputs.rocketmq_version }} | grep -q "$EXPECTED_ARCH"
+
+      - name: Save Image to Tar
+        run: |
+          set -eux
+          # 将架构名称中的斜杠替换为下划线，方便作为文件名 (例如 linux_amd64)
+          PLATFORM_STR=$(echo "${{ inputs.platform }}" | tr '/' '_')
+          FILENAME="rocketmq_${{ inputs.rocketmq_version }}_${PLATFORM_STR}.tar"
+          
+          # 打包镜像
+          docker save apache/rocketmq:${{ inputs.rocketmq_version }} -o $FILENAME
+          gzip -f $FILENAME
+          
+          # 将文件名传递给下一个 Step 使用
+          echo "PACKED_FILE=${FILENAME}.gz" >> $GITHUB_ENV
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rocketmq-offline-image-${{ inputs.rocketmq_version }}
+          path: |
+            *.tar.gz
+          retention-days: 7
